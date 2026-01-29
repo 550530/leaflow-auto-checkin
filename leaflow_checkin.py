@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
-Leaflow 多账号自动签到脚本（最终稳定版）
-方案：Selenium 登录 + JS 触发前端签到逻辑
+Leaflow 多账号自动签到（最终稳定版）
+方案：Selenium 真浏览器 + 前端点击签到
+环境：GitHub Actions / VPS / Docker / 本地
 """
 
 import os
@@ -18,7 +21,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
 
 
-# ========= 日志 =========
+# ================= 日志 =================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -26,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ========= 单账号 =========
+# ================= 单账号 =================
 class LeaflowAutoCheckin:
     def __init__(self, email, password):
         self.email = email
@@ -37,13 +40,18 @@ class LeaflowAutoCheckin:
     def setup_driver(self):
         options = Options()
 
-        if os.getenv("GITHUB_ACTIONS"):
-            options.add_argument("--headless=new")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--window-size=1920,1080")
+        # ===== GitHub Actions / VPS 必须参数 =====
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-software-rasterizer")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--disable-features=VizDisplayCompositor")
+        options.add_argument("--single-process")
+        options.add_argument("--user-data-dir=/tmp/chrome-profile")
 
+        # 反自动化
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
@@ -53,84 +61,78 @@ class LeaflowAutoCheckin:
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
         )
 
-    def close_popup(self):
+    def safe_click_blank(self):
         try:
             ActionChains(self.driver).move_by_offset(10, 10).click().perform()
             time.sleep(1)
         except:
             pass
 
-    # ========= 登录 =========
+    # ================= 登录 =================
     def login(self):
         logger.info("开始登录")
         self.driver.get("https://leaflow.net/login")
-        time.sleep(5)
-        self.close_popup()
+        time.sleep(6)
+        self.safe_click_blank()
 
-        email_input = WebDriverWait(self.driver, 15).until(
+        email_input = WebDriverWait(self.driver, 20).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='email'],input[type='text']"))
         )
         email_input.clear()
         email_input.send_keys(self.email)
 
-        pwd_input = WebDriverWait(self.driver, 15).until(
+        pwd_input = WebDriverWait(self.driver, 20).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='password']"))
         )
         pwd_input.clear()
         pwd_input.send_keys(self.password)
 
-        btn = WebDriverWait(self.driver, 15).until(
+        login_btn = WebDriverWait(self.driver, 20).until(
             EC.element_to_be_clickable(
                 (By.XPATH, "//button[@type='submit' or contains(.,'登录') or contains(.,'Login')]")
             )
         )
-        btn.click()
+        login_btn.click()
 
-        WebDriverWait(self.driver, 30).until(
+        WebDriverWait(self.driver, 40).until(
             lambda d: "login" not in d.current_url
         )
 
         logger.info(f"登录成功：{self.driver.current_url}")
 
-    # ========= JS 触发签到 =========
-    def js_checkin(self):
-        logger.info("使用 JS 触发前端签到")
-
+    # ================= 签到 =================
+    def checkin(self):
+        logger.info("进入签到页面")
         self.driver.get("https://leaflow.net/dashboard")
-        time.sleep(5)
-        self.close_popup()
+        time.sleep(6)
+        self.safe_click_blank()
 
-        # 尝试多种方式触发签到（容错）
-        js_list = [
-            # 方式 1：直接找按钮点击
-            """
-            let btn = [...document.querySelectorAll("button,div")]
-                .find(e => e.innerText && e.innerText.includes("签到"));
-            if (btn) { btn.click(); return "clicked"; }
-            return "not_found";
-            """,
+        # 找“签到”按钮并点击
+        try:
+            btn = WebDriverWait(self.driver, 20).until(
+                EC.element_to_be_clickable((
+                    By.XPATH,
+                    "//*[contains(text(),'签到')]"
+                ))
+            )
+            btn.click()
+            logger.info("已点击签到按钮")
+        except:
+            logger.warning("未找到签到按钮，尝试 JS 触发")
+            self.driver.execute_script("""
+                let el=[...document.querySelectorAll('*')]
+                .find(e=>e.innerText && e.innerText.includes('签到'));
+                if(el) el.click();
+            """)
 
-            # 方式 2：触发 Vue/React 事件（兜底）
-            """
-            let ev = new Event("click", {bubbles:true});
-            document.body.dispatchEvent(ev);
-            return "event_dispatched";
-            """,
-        ]
+        time.sleep(4)
 
-        for js in js_list:
-            result = self.driver.execute_script(js)
-            logger.info(f"签到触发结果：{result}")
-            time.sleep(3)
-
-        # 判断是否已签到（文本判断，足够稳定）
         body_text = self.driver.find_element(By.TAG_NAME, "body").text
         if any(k in body_text for k in ["已签到", "签到成功", "今日已签到"]):
-            return "签到成功（前端确认）"
+            return "签到成功"
+        return "已尝试签到（请人工确认）"
 
-        return "已尝试触发签到（状态请人工确认）"
-
-    # ========= 余额 =========
+    # ================= 余额 =================
     def get_balance(self):
         try:
             body = self.driver.find_element(By.TAG_NAME, "body").text
@@ -145,7 +147,7 @@ class LeaflowAutoCheckin:
     def run(self):
         try:
             self.login()
-            result = self.js_checkin()
+            result = self.checkin()
             balance = self.get_balance()
             return True, result, balance
         except Exception as e:
@@ -155,7 +157,7 @@ class LeaflowAutoCheckin:
                 self.driver.quit()
 
 
-# ========= 多账号 =========
+# ================= 多账号 =================
 class MultiAccountManager:
     def __init__(self):
         self.accounts = self.load_accounts()
@@ -168,17 +170,17 @@ class MultiAccountManager:
             raise ValueError("未设置 LEAFLOW_ACCOUNTS")
 
         accounts = []
-        for p in raw.split(","):
-            email, pwd = p.split(":", 1)
+        for item in raw.split(","):
+            email, pwd = item.split(":", 1)
             accounts.append((email.strip(), pwd.strip()))
         return accounts
 
-    def send_notification(self, results):
+    def notify(self, results):
         if not self.bot or not self.chat_id:
             return
 
-        date = datetime.now().strftime("%Y/%m/%d")
-        msg = f"🎁 Leaflow 签到通知\n📅 {date}\n\n"
+        date = datetime.now().strftime("%Y-%m-%d")
+        msg = f"🎁 Leaflow 自动签到\n📅 {date}\n\n"
 
         for email, ok, res, bal in results:
             masked = email[:3] + "***" + email[email.find("@"):]
@@ -200,9 +202,8 @@ class MultiAccountManager:
             checker = LeaflowAutoCheckin(email, pwd)
             ok, res, bal = checker.run()
             results.append((email, ok, res, bal))
-            time.sleep(5)
-
-        self.send_notification(results)
+            time.sleep(6)
+        self.notify(results)
 
 
 def main():
